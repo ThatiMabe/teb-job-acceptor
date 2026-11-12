@@ -1,0 +1,2 @@
+requests>=2.31
+playwright>=1.40   # used by the old login helper and by the mock-page tests

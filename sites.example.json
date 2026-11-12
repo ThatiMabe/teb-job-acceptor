@@ -1,0 +1,68 @@
+{
+  "check_every_seconds": 60,
+  "mode": "watch",
+  "sites": [
+    {
+      "id": "kandua",
+      "name": "Kandua Pro",
+      "jobs_url": "https://kandua-pro.web.app/new-jobs",
+      "loaded_texts": [
+        "New Jobs"
+      ],
+      "empty_texts": [
+        "No New Jobs Yet"
+      ],
+      "login_url_parts": [
+        "login",
+        "signin",
+        "sign-in",
+        "auth"
+      ],
+      "login_texts": [
+        "Log in",
+        "Sign in",
+        "Verification code"
+      ],
+      "accept_rules": "",
+      "auto_accept": true,
+      "accept_kind": "kandua",
+      "recon_first_jobs": 3,
+      "new_jobs_url_part": "/new-jobs"
+    },
+    {
+      "id": "stdbank",
+      "name": "Standard Bank Insurance (Gauteng)",
+      "accept_kind": "standardbank",
+      "jobs_url": "https://insurancesp.standardbank.co.za/dashboard",
+      "login_url": "https://insurancesp.standardbank.co.za/login",
+      "loaded_texts": [
+        "Jobs has been assigned but not yet accepted"
+      ],
+      "empty_texts": [
+        "No new jobs found"
+      ],
+      "login_url_parts": [
+        "enterprisests.standardbank",
+        "authorization.oauth2",
+        "/idp/",
+        "/login"
+      ],
+      "login_texts": [
+        "Sign in",
+        "Sign Off Successful"
+      ],
+      "accept_rules": "",
+      "auto_accept": true,
+      "landing_url": "https://insurancesp.standardbank.co.za/landing-screen",
+      "settled_texts": [
+        "SIGN OUT"
+      ],
+      "nav_new_jobs": true,
+      "proof_after_accept": false
+    }
+  ],
+  "skip_if_contains": [
+    "microwave"
+  ],
+  "_note": "Copy this file to sites.json. skip_if_contains: jobs mentioning any of these words are never accepted. mode/auto_accept: accepting is ON when auto_accept is true and accept_kind is set."
+}

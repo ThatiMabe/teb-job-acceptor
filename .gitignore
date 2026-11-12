@@ -1,0 +1,26 @@
+# secrets and personal data: never commit these
+.env
+*.env
+notion.json
+sites.json
+sites_*.json
+!sites.example.json
+state.json
+jobs_log.csv
+.watcher.lock
+# browser profile (contains saved sign-ins), screenshots of real jobs, recordings, logs
+profile/
+captures/
+recordings/
+logs/
+# build output (the package contains keys)
+dist/
+# Python
+.venv/
+__pycache__/
+*.pyc
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
