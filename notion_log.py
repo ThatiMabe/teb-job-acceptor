@@ -83,10 +83,24 @@ def _txt(v):
     return {"rich_text": [{"type": "text", "text": {"content": str(v)[:1900]}}]} if v else {"rich_text": []}
 
 
+def _retryable(e):
+    """A network problem, a Notion server error or a rate limit is worth trying again; anything else is not."""
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        return e.response.status_code == 429 or e.response.status_code >= 500
+    return isinstance(e, requests.RequestException)
+
+
 def add_event(name, event, site=None, status=None, job=None, details=None, link=None,
-              checks=None, jobs_seen=None, when=None):
-    """Add one row. Never raises: Notion being down must not stop the watcher."""
+              checks=None, jobs_seen=None, when=None, _replay=False):
+    """Add one row. Never raises: Notion being down must not stop the watcher.
+    If Notion cannot be reached the row is queued (watcher.flush_outbox sends it later, with its original time).
+    Returns True when written, False when queued or still unreachable, None when Notion refused it for good."""
     try:
+        if isinstance(when, str):
+            when = datetime.fromisoformat(when)
+        when = when or datetime.now()
+        saved = dict(name=name, event=event, site=site, status=status, job=job, details=details, link=link,
+                     checks=checks, jobs_seen=jobs_seen, when=when.astimezone().isoformat(timespec="seconds"))
         db = json.loads(CONFIG.read_text())["database_id"]
         job = job or {}
         props = {
@@ -119,12 +133,17 @@ def add_event(name, event, site=None, status=None, job=None, details=None, link=
         r.raise_for_status()
         return True
     except Exception as e:
+        retry = _retryable(e)
         try:
-            from watcher import log
-            log.error("Notion write failed (%s): %s", name, e)
+            from watcher import log, outbox_put
+            if retry and not _replay:
+                outbox_put("notion", {"args": saved})
+                log.error("Notion write failed (%s): %s; queued to retry", name, e)
+            else:
+                log.error("Notion write failed (%s): %s", name, e)
         except Exception:
             pass
-        return False
+        return False if retry else None
 
 
 if __name__ == "__main__":

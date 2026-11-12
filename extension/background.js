@@ -58,7 +58,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const siteId = Object.keys(map).find(k => map[k] === sender.tab.id) || 'unknown';
       const image = await snap(sender.tab, true);    // brings the tab to the front and photographs it
       if (image) {
-        await fetch(SERVER + '/recon', {
+        await net(SERVER + '/recon', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ site: siteId, label: msg.label, i: msg.i, total: msg.total, image, url: sender.tab.url })
         });
@@ -79,18 +79,32 @@ const lastStart = {};
 let snapChain = Promise.resolve();
 let accepting = 0, acceptChain = Promise.resolve();
 
+// Nothing may wait forever: a check that hangs (the agent restarting mid-request, a page that never answers) would
+// otherwise stop that site being checked for good. Each wait has a limit, and a stuck check is abandoned and retried.
+let SITE_TIMEOUT_MS = 200000;       // one whole check of one site
+let ACCEPT_TIMEOUT_MS = 150000;     // one accept routine (opening jobs, clicking, confirming)
+const withTimeout = (p, ms, what) => Promise.race([
+  p, new Promise((_, reject) => setTimeout(() => reject(new Error(what + ' timed out after ' + Math.round(ms / 1000) + ' s')), ms))]);
+const net = (url, opts) => fetch(url, { ...(opts || {}), signal: AbortSignal.timeout(30000) });   // never wait forever on the agent
+
 async function runChecks(force) {
   let cfg;
-  try { cfg = await (await fetch(SERVER + '/config')).json(); }
+  try { cfg = await (await net(SERVER + '/config')).json(); }
   catch (e) { chrome.action.setBadgeText({ text: 'OFF' }); return; }  // agent not running
   chrome.action.setBadgeText({ text: '' });
   for (const site of cfg.sites) {
     const every = (site.check_every_seconds || 60) * 1000;
-    if (siteRunning.has(site.id)) continue;                                   // still busy with the last check
+    if (siteRunning.has(site.id)) {
+      if (Date.now() - (lastStart[site.id] || 0) < SITE_TIMEOUT_MS + 30000) continue;   // still busy with the last check
+      siteRunning.delete(site.id);                                                       // stuck far too long: start afresh
+    }
     if (!force && lastStart[site.id] && Date.now() - lastStart[site.id] < every - 5000) continue;   // not due yet
     siteRunning.add(site.id);
     lastStart[site.id] = Date.now();
-    runSite(site, cfg.skip_words || []).catch(() => {}).finally(() => siteRunning.delete(site.id));
+    const mine = lastStart[site.id];
+    withTimeout(runSite(site, cfg.skip_words || []), SITE_TIMEOUT_MS, 'check of ' + site.name)
+      .catch(e => report(site, { url: '', text: '', html: '', error: String(e) }).catch(() => {}))
+      .finally(() => { if (lastStart[site.id] === mine) siteRunning.delete(site.id); });
   }
 }
 
@@ -116,7 +130,7 @@ async function withAcceptLock(fn) {
   acceptChain = new Promise(r => { release = r; });
   await prev;
   accepting++;
-  try { return await fn(); } finally { accepting--; release(); }
+  try { return await withTimeout(fn(), ACCEPT_TIMEOUT_MS, 'accept'); } finally { accepting--; release(); }
 }
 async function whenNoAccept(maxMs) {
   const t0 = Date.now();
@@ -263,7 +277,7 @@ async function proofShots(tab, site, title) {
   const send = async (label, i, total) => {
     const image = await snap(tab);
     if (!image) return false;
-    await fetch(SERVER + '/recon', {
+    await net(SERVER + '/recon', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ site: site.id, label: `Reference ${title}: ${label}`, i, total, image, url: '' })
     });
@@ -281,7 +295,7 @@ async function proofShots(tab, site, title) {
   } catch (e) { /* fall through to the note below */ }
   if (!ok1 && !ok2) {
     try {
-      await fetch(SERVER + '/recon', {
+      await net(SERVER + '/recon', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ site: site.id, label: `Reference ${title}`, i: 0, total: 1, note: true })
       });
@@ -373,7 +387,7 @@ async function readPage(markers) {
 
 async function report(site, data) {
   try {
-    await fetch(SERVER + '/report', {
+    await net(SERVER + '/report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ site: site.id, ...data, load_errors: LOAD_ERRORS.length ? LOAD_ERRORS : undefined })
     });

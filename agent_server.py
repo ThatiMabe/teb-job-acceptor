@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from watcher import (CAPTURES, CHROME, PROFILE, ROOT, ask_deepseek, keep_session_cookies,
+from watcher import (CAPTURES, CHROME, PROFILE, ROOT, ask_deepseek, flush_outbox, keep_session_cookies,
                      load_config, load_state, log, save_state, telegram)
 
 PORT = 8765
@@ -480,6 +480,17 @@ def watchdog():
             log.exception("watchdog: %s", e)
 
 
+def outbox_flusher(every=30):
+    """Every 30 s, send alerts and Notion rows that were queued while the internet was down."""
+    time.sleep(10)
+    while True:
+        try:
+            flush_outbox()
+        except Exception as e:
+            log.exception("outbox_flusher: %s", e)
+        time.sleep(every)
+
+
 def boot_time():
     """When Windows last started (seconds since 1970), from the tick counter. None if it cannot be read."""
     try:
@@ -517,7 +528,7 @@ def announce_return(min_gap=600):
             return
         msg, dur = back_online_message(last, now, boot_time())
         for _ in range(20):
-            res = telegram(msg)
+            res = telegram(msg, queue=False)        # this loop retries by itself, so nothing is queued (no duplicates)
             if any(res.values()):
                 break
             time.sleep(30)
@@ -545,6 +556,7 @@ def main():
         start_chrome()
     threading.Thread(target=watchdog, daemon=True).start()
     threading.Thread(target=announce_return, daemon=True).start()
+    threading.Thread(target=outbox_flusher, daemon=True).start()
     if "--quiet" not in sys.argv:
         _cfg = load_config()
         _every = ", ".join(f"{s['name'].split(' (')[0]} every {int(s.get('check_every_seconds') or _cfg.get('check_every_seconds') or 60)} s"

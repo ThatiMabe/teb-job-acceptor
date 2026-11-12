@@ -159,6 +159,16 @@ in `sites.json`: the server classifies any other address as `wrong_page` (silent
   be settled (two equal reads with the Accept button present) before the skip-word check reads it, and a 250 ms settle lets all pop-up buttons appear before they are read.
 - Daily report coverage is capped at 100%, so Kandua's doubled check count does not distort it.
 
+## Alerts survive internet blips (2026-11-12, extension 0.10.2)
+Cause: on 2026-11-12 15:29 to 15:37 the PC's link to Telegram and Notion dropped (`SSLEOFError`). The agent sent each alert once, so the "ACCEPTED" message for a real job was lost
+(the accept itself was fine and recorded). Now (`watcher.py`):
+- `telegram()` tries the picture, falls back to the text alone, and queues what still fails in `outbox\telegram\` (the picture is copied to `outbox\photos\`). A 403/400 (person never pressed Start) is NOT queued.
+  `telegram(..., queue=False)` for callers that retry themselves (`announce_return`), so no duplicates.
+- `notion_log.add_event()` queues a row it cannot write in `outbox\notion\` with its original time (returns True written, False queued, None refused for good).
+- `flush_outbox()` runs every 30 s from `agent_server.outbox_flusher`: oldest first, stops at the first network failure, labels late messages "DELAYED MESSAGE", drops items older than 24 h, caps the queue at 200.
+- Tests: `tests\test_outbox.py`. The extension also got timeouts (`background.js`): every fetch to the agent (30 s), each site check (200 s) and each accept (150 s) are abandoned if they hang, so one stuck wait can no longer stop a site being checked.
+  Test: `node tests\test_schedule.js` (hang cases).
+
 ## Kandua safety rules (2026-11-10)
 The Kandua routine makes exactly three kinds of click: the job tile (only tiles whose status says "Available"), the "Accept Job" button, and the single
 "Yes, I can do this job" style button in the pop-up that follows. It never messages, quotes, calls or invoices anyone. It also refuses (and asks the owner) when the

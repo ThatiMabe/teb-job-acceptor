@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -95,31 +96,168 @@ def chat_ids():
     return ids
 
 
-def telegram(text, photo: Path | None = None):
-    """Send to every chat id. One person failing (for example they never pressed Start on the
-    bot) is logged and never stops the others. Returns {chat_id: True/False}."""
+OUTBOX = ROOT / "outbox"            # alerts and Notion rows that could not be sent yet (the internet blipped)
+OUTBOX_MAX_AGE = 24 * 3600          # a queued item older than this is dropped (and logged)
+OUTBOX_MAX_ITEMS = 200
+_FLUSH_LOCK = threading.Lock()
+
+
+def _tg_send(token, chat, text, photo, timeout):
+    """One attempt. Returns ("ok" | "retry" | "fail", detail). "retry" = a network problem, a Telegram server
+    error or a rate limit (worth trying again). "fail" = Telegram refused it for good (for example the person
+    never pressed Start on the bot), so retrying cannot help."""
+    try:
+        if photo:
+            with open(photo, "rb") as f:
+                r = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto",
+                                  data={"chat_id": chat, "caption": text[:1000]}, files={"photo": f}, timeout=timeout)
+        else:
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              data={"chat_id": chat, "text": text[:4000]}, timeout=timeout)
+    except Exception as e:
+        return "retry", f"{type(e).__name__}: {str(e)[:120]}"
+    if r.ok:
+        return "ok", ""
+    detail = f"{r.status_code} {r.text[:160]}"
+    return ("retry" if r.status_code == 429 or r.status_code >= 500 else "fail"), detail
+
+
+def outbox_put(kind, payload):
+    """Queue something to send later (atomic write). kind = "telegram" or "notion"."""
+    d = OUTBOX / kind
+    d.mkdir(parents=True, exist_ok=True)
+    files = sorted(d.glob("*.json"))
+    while len(files) >= OUTBOX_MAX_ITEMS:                 # never grow without limit: the oldest goes
+        files.pop(0).unlink(missing_ok=True)
+    name = f"{int(time.time() * 1000)}_{random.randint(100, 999)}.json"
+    tmp = d / (name + ".tmp")
+    tmp.write_text(json.dumps({**payload, "ts": time.time()}), encoding="utf-8")
+    tmp.replace(d / name)
+
+
+def _tg_queue(chat, text, photo):
+    """Queue a Telegram message; its picture is copied into the outbox so it cannot be overwritten meanwhile."""
+    import shutil
+    pname = None
+    if photo and Path(photo).exists():
+        (OUTBOX / "photos").mkdir(parents=True, exist_ok=True)
+        pname = f"{int(time.time() * 1000)}_{random.randint(100, 999)}{Path(photo).suffix or '.jpg'}"
+        shutil.copy2(photo, OUTBOX / "photos" / pname)
+    outbox_put("telegram", {"chat": chat, "text": text, "photo": pname})
+
+
+def _tg_deliver(token, chat, text, photo, queue):
+    """Send to one person. A picture that will not go through is sent as plain text first (much smaller), and the
+    picture follows later. Anything that still fails for a network reason is queued. True = the person got the text."""
+    has_photo = bool(photo and Path(photo).exists())
+    if has_photo:
+        st, why = _tg_send(token, chat, text, photo, 25)
+        if st == "ok":
+            return True
+        if st == "fail":
+            log.error("Telegram to %s failed: %s", chat, why)
+            return False
+        log.warning("Telegram picture to %s did not go through (%s); sending the text on its own", chat, why[:100])
+        st2, why2 = _tg_send(token, chat, text, None, 15)
+        if st2 == "ok":
+            if queue:
+                _tg_queue(chat, "(The picture for the message above, sent late.)", photo)
+            return True
+        if st2 == "fail":
+            log.error("Telegram to %s failed: %s", chat, why2)
+            return False
+        why = why2
+    else:
+        st, why = _tg_send(token, chat, text, None, 15)
+        if st == "ok":
+            return True
+        if st == "fail":
+            log.error("Telegram to %s failed: %s", chat, why)
+            return False
+    if queue:
+        _tg_queue(chat, text, photo if has_photo else None)
+        log.error("Telegram send to %s failed (%s); queued, it will be sent when the internet is back", chat, why[:100])
+    else:
+        log.error("Telegram send to %s failed: %s", chat, why)
+    return False
+
+
+def telegram(text, photo: Path | None = None, queue=True):
+    """Send to every chat id. One person failing (for example they never pressed Start on the bot) never stops
+    the others. A network failure is retried with a text-only fallback and then queued (queue=False: do not queue,
+    for callers that retry themselves). Returns {chat_id: True/False}; False also covers "queued for later"."""
     token, chats = ENV.get("TELEGRAM_BOT_TOKEN"), chat_ids()
     if not token or not chats:
         log.warning("Telegram not configured; alert was: %s", text)
         return {}
-    results = {}
-    for chat in chats:
-        try:
-            if photo and photo.exists():
-                with open(photo, "rb") as f:
-                    r = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto",
-                                      data={"chat_id": chat, "caption": text[:1000]},
-                                      files={"photo": f}, timeout=30)
+    return {chat: _tg_deliver(token, chat, text, photo, queue) for chat in chats}
+
+
+def flush_outbox():
+    """Send what was queued while the internet was down: Telegram messages first, then Notion rows, oldest first.
+    Stops at the first network failure (the internet is still down). Safe to call often. Returns how many were sent."""
+    if not _FLUSH_LOCK.acquire(blocking=False):
+        return 0
+    sent = 0
+    try:
+        token = ENV.get("TELEGRAM_BOT_TOKEN")
+        d = OUTBOX / "telegram"
+        for f in (sorted(d.glob("*.json")) if d.exists() and token else []):
+            try:
+                item = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                f.unlink(missing_ok=True)
+                continue
+            photo = (OUTBOX / "photos" / item["photo"]) if item.get("photo") else None
+            if photo is not None and not photo.exists():
+                photo = None
+            age = time.time() - item.get("ts", time.time())
+            if age > OUTBOX_MAX_AGE:
+                log.error("Dropped a queued Telegram message older than 24 h: %s", item.get("text", "")[:80])
+                f.unlink(missing_ok=True)
+                if photo:
+                    photo.unlink(missing_ok=True)
+                continue
+            text = item.get("text", "")
+            if age > 90 and not text.startswith("(The picture"):
+                text = (f"⏰ DELAYED MESSAGE (meant for {datetime.fromtimestamp(item['ts']):%H:%M}, "
+                        "the internet was down):\n" + text)
+            st, why = _tg_send(token, item["chat"], text, photo, 25)
+            if st == "retry":
+                log.info("Outbox: still cannot reach Telegram (%s)", why[:80])
+                return sent
+            if st == "fail":
+                log.error("Queued Telegram message could not be delivered for good: %s", why)
             else:
-                r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                                  data={"chat_id": chat, "text": text[:4000]}, timeout=30)
-            results[chat] = r.ok
-            if not r.ok:
-                log.error("Telegram to %s failed: %s %s", chat, r.status_code, r.text[:160])
-        except Exception as e:
-            results[chat] = False
-            log.error("Telegram send to %s failed: %s", chat, e)
-    return results
+                sent += 1
+                log.info("Outbox: sent a delayed Telegram message (queued %s)", datetime.fromtimestamp(item["ts"]).strftime("%H:%M"))
+            f.unlink(missing_ok=True)
+            if photo:
+                photo.unlink(missing_ok=True)
+        nd = OUTBOX / "notion"
+        if nd.exists():
+            from notion_log import add_event
+            for f in sorted(nd.glob("*.json")):
+                try:
+                    item = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    f.unlink(missing_ok=True)
+                    continue
+                if time.time() - item.get("ts", time.time()) > OUTBOX_MAX_AGE:
+                    log.error("Dropped a queued Notion row older than 24 h: %s", item.get("args", {}).get("name"))
+                    f.unlink(missing_ok=True)
+                    continue
+                res = add_event(**item["args"], _replay=True)
+                if res is False:                       # still cannot reach Notion
+                    return sent
+                if res:
+                    sent += 1
+                f.unlink(missing_ok=True)                # sent, or refused for good (already logged)
+    except Exception as e:
+        log.exception("flush_outbox: %s", e)
+    finally:
+        _FLUSH_LOCK.release()
+    return sent
 
 
 # ---------- DeepSeek ----------

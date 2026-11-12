@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Work Acceptor",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Checks your job sites every minute and reports to the local Work Acceptor agent.",
   "permissions": ["alarms", "tabs", "scripting", "storage"],
   "host_permissions": [

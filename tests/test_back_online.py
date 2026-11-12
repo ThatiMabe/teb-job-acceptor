@@ -36,7 +36,7 @@ a.time.sleep = lambda s: None            # do not really wait between retries
 
 # 3) short gap: stays quiet (a normal restart of the agent)
 state.clear(); state["kandua"] = {"last_report_ts": now - 120}
-a.telegram = lambda m, photo=None: (sent.append(m) or {"1": True})
+a.telegram = lambda m, photo=None, **k: (sent.append(m) or {"1": True})
 sent.clear(); notes.clear(); a.announce_return()
 check("gap of 2 minutes: says nothing", not sent and not notes)
 
@@ -52,7 +52,7 @@ check("gap of 2 hours: one Telegram message and one Notion row", len(sent) == 1 
 
 # 6) the internet is not up yet: keeps retrying, then succeeds
 tries = {"n": 0}
-def flaky(m, photo=None):
+def flaky(m, photo=None, **k):
     tries["n"] += 1
     return {"1": tries["n"] >= 4}          # fails 3 times, then works
 a.telegram = flaky
