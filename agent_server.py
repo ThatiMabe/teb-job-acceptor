@@ -395,6 +395,7 @@ class Handler(BaseHTTPRequestHandler):
                                                "loaded_texts", "empty_texts", "login_texts",
                                                "accept_kind", "auto_accept", "landing_url",
                                                "settled_texts", "nav_new_jobs", "proof_after_accept", "new_jobs_url_part")},
+                      "check_every_seconds": int(s.get("check_every_seconds") or cfg.get("check_every_seconds") or 60),
                       "recon": left.get(s["id"], recon_default(s)) > 0,   # photograph the job page this time?
                       "proof": s["id"] in proof}                         # reference pictures requested now?
                      for s in cfg["sites"]]
@@ -479,6 +480,54 @@ def watchdog():
             log.exception("watchdog: %s", e)
 
 
+def boot_time():
+    """When Windows last started (seconds since 1970), from the tick counter. None if it cannot be read."""
+    try:
+        import ctypes
+        return time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000.0
+    except Exception:
+        return None
+
+
+def back_online_message(last, now, boot):
+    """Text for the 'I was offline' notice. last/now/boot are seconds since 1970 (boot may be None)."""
+    mins = int((now - last) // 60)
+    dur = f"{mins // 60} h {mins % 60} min" if mins >= 60 else f"{mins} min"
+    restarted = bool(boot and boot > last)
+    why = (f"The PC restarted at {datetime.fromtimestamp(boot):%H:%M} (usually a Windows update)." if restarted
+           else "The PC was asleep, switched off or had no internet.")
+    msg = (f"🔁 Work Acceptor is back. It was not checking from {datetime.fromtimestamp(last):%a %H:%M} to "
+           f"{datetime.fromtimestamp(now):%H:%M} ({dur}). {why}\n"
+           "Jobs that arrived in that time were NOT seen by the agent, so check the sites by hand for anything missed.")
+    if restarted:
+        msg += ("\nAfter a restart Standard Bank needs a fresh sign-in: sign in on its tab in the agent's Chrome window "
+                "(you will also get a signed-out alert).")
+    return msg, dur
+
+
+def announce_return(min_gap=600):
+    """If the agent starts after a long silence, say so. A PC restart, sleep or lost internet leaves no other trace.
+    Retries for up to 10 minutes, because the internet may not be up yet right after a restart."""
+    try:
+        state = load_state()
+        last = max([v.get("last_report_ts", 0) for k, v in state.items()
+                    if isinstance(v, dict) and not str(k).startswith("_")] or [0])
+        now = time.time()
+        if not last or now - last < min_gap:
+            return
+        msg, dur = back_online_message(last, now, boot_time())
+        for _ in range(20):
+            res = telegram(msg)
+            if any(res.values()):
+                break
+            time.sleep(30)
+        notion_async("Agent back online after " + dur, "Checks stopped", site="All sites", status="Problem",
+                     details=msg[:1500])
+        log.info("announced return after %s", dur)
+    except Exception as e:
+        log.error("announce_return failed: %s", e)
+
+
 def main():
     # single instance: if the port is taken, another copy is running
     with socket.socket() as sck:
@@ -495,8 +544,12 @@ def main():
     if not agent_chrome_running():
         start_chrome()
     threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=announce_return, daemon=True).start()
     if "--quiet" not in sys.argv:
-        telegram("✅ Work Acceptor started: checking Kandua and Standard Bank every minute (watch mode).")
+        _cfg = load_config()
+        _every = ", ".join(f"{s['name'].split(' (')[0]} every {int(s.get('check_every_seconds') or _cfg.get('check_every_seconds') or 60)} s"
+                           for s in _cfg["sites"])
+        telegram(f"✅ Work Acceptor started: checking {_every}.")
     server.serve_forever()
 
 

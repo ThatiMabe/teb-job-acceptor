@@ -5,6 +5,7 @@
     {
       "id": "kandua",
       "name": "Kandua Pro",
+      "check_every_seconds": 30,
       "jobs_url": "https://kandua-pro.web.app/new-jobs",
       "loaded_texts": [
         "New Jobs"

@@ -149,6 +149,16 @@ After the owner accepted a job by hand the tab landed on /my-jobs and the agent 
 in `sites.json`: the server classifies any other address as `wrong_page` (silent), the extension navigates back to the New Jobs address and reads again, and
 `accept_kandua.js` refuses to act unless `location.pathname` starts with `/new-jobs`. Test: "My Jobs page" case in `tests\test_accept_kandua.py`.
 
+## Check rhythm per site, and faster Kandua accept (2026-11-11, extension 0.10.0)
+- `sites.json`: each site may have `check_every_seconds` (Kandua 30, Standard Bank falls back to the top-level 60). `/config` hands it to the extension.
+- `background.js`: the alarm ticks every 30 s (Chrome's minimum); `runChecks` starts only the sites that are due, each in its own `runSite`
+  (a slow Standard Bank page no longer holds Kandua back). Two shared things take turns: pictures (`snap` is serialised) and accepting
+  (`withAcceptLock`; while a job is being accepted no other site's routine picture brings its own tab to the front, because a hidden tab's timers run slowly).
+  Test: `node tests\test_schedule.js`.
+- `accept_kandua.js` waits are shorter (polls of 150 to 450 ms instead of 500 to 700 ms, no fixed 1.5 s wait after "Yes, I can do this job"). The job text must still
+  be settled (two equal reads with the Accept button present) before the skip-word check reads it, and a 250 ms settle lets all pop-up buttons appear before they are read.
+- Daily report coverage is capped at 100%, so Kandua's doubled check count does not distort it.
+
 ## Kandua safety rules (2026-11-10)
 The Kandua routine makes exactly three kinds of click: the job tile (only tiles whose status says "Available"), the "Accept Job" button, and the single
 "Yes, I can do this job" style button in the pop-up that follows. It never messages, quotes, calls or invoices anyone. It also refuses (and asks the owner) when the

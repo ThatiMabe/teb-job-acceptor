@@ -74,20 +74,21 @@ async function acceptStdBank(alreadyTried, skipWords) {
 
     // Wait for a confirmation pop-up (up to 8 s)
     let dlg = null;
-    for (let i = 0; i < 16 && !dlg; i++) {
-      await wait(500);
+    for (let i = 0; i < 55 && !dlg; i++) {
+      await wait(150);
       dlg = [...document.querySelectorAll(DIALOG)].find(d => vis(d) && label(d).length > 0) || null;
       if (!dlg && !findAccepts().some(a => a.jobId === jobId)) break;  // card already gone, no pop-up
     }
     let dialogText = null;
     if (dlg) {
+      await wait(250);                                   // let all of the pop-up's buttons appear before reading them
       dialogText = (dlg.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600);
       const inputs = [...dlg.querySelectorAll('input:not([type="hidden"]):not([type="button"]):not([type="submit"]), select, textarea')].filter(vis);
       const buttons = clickables(dlg);
       const yes = buttons.filter(b => YES.includes(label(b)));
       if (inputs.length === 0 && yes.length === 1) {
         yes[0].click();
-        await wait(1500);
+        await wait(100);
       } else {
         out.needs_user = {
           job_id: jobId, card_text: cardText.slice(0, 1500),
@@ -101,8 +102,8 @@ async function acceptStdBank(alreadyTried, skipWords) {
 
     // Did the job leave the New Jobs list? (up to 8 s)
     let gone = false;
-    for (let i = 0; i < 16 && !gone; i++) {
-      await wait(500);
+    for (let i = 0; i < 40 && !gone; i++) {
+      await wait(200);
       gone = !findAccepts().some(a => a.jobId === jobId);
     }
     if (gone) {

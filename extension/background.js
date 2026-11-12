@@ -19,7 +19,12 @@ if (typeof acceptKandua === 'function') ACCEPTORS.kandua = acceptKandua;
 const SERVER = 'http://127.0.0.1:8765';
 let running = false;
 
-function schedule() { chrome.alarms.create('check', { periodInMinutes: 1, delayInMinutes: 0.1 }); }
+// The alarm ticks every 30 s (the shortest Chrome allows). Each site has its own rhythm (check_every_seconds from the
+// agent: Kandua 30 s, Standard Bank 60 s), and runChecks only starts the sites that are due.
+const TICK_MIN = 0.5;
+function schedule() { chrome.alarms.create('check', { periodInMinutes: TICK_MIN, delayInMinutes: 0.1 }); }
+// alarms survive a restart of this background script; only (re)create it when it is missing or has the old 1-minute rhythm
+chrome.alarms.get('check', a => { if (!a || a.periodInMinutes !== TICK_MIN) schedule(); });
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.remove('tabMap');  // re-claim tabs left to right after an update
   // After an update, forget the Kandua jobs it had given up on ("k-..." keys) so a job still sitting in New Jobs gets
@@ -42,7 +47,7 @@ chrome.tabs.onReplaced.addListener(async (addedId, removedId) => {
   for (const k of Object.keys(map)) if (map[k] === removedId) map[k] = addedId;
   await chrome.storage.local.set({ tabMap: map });
 });
-chrome.action.onClicked.addListener(() => runChecks());
+chrome.action.onClicked.addListener(() => runChecks(true));
 
 // A job page asks for a picture of itself (accept_kandua.js, recon mode). Capture the tab and pass it to the agent.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -66,29 +71,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function runChecks() {
-  if (running) return;
-  running = true;
-  try {
-    let cfg;
-    try { cfg = await (await fetch(SERVER + '/config')).json(); }
-    catch (e) { chrome.action.setBadgeText({ text: 'OFF' }); return; }  // agent not running
-    chrome.action.setBadgeText({ text: '' });
-    for (const site of cfg.sites) {
-      let err = null;
-      try { await checkSite(site, cfg.skip_words || []); }
-      catch (e) {
-        err = e;
-        if (/No tab with id/i.test(String(e))) {            // the tab was swapped or closed under us: look again, once
-          try { await checkSite(site, cfg.skip_words || []); err = null; } catch (e2) { err = e2; }
-        }
-      }
-      if (err) await report(site, { url: '', text: '', html: '', error: String(err) });
-      if (site.proof) {                       // the owner asked for a reference picture now
-        try { const t = await findTab(site); if (t) await proofShots(t, site, 'on request'); } catch (e) { /* next minute */ }
-      }
+// Every site runs on its own: a slow Standard Bank page never holds Kandua back. Two things are shared and therefore
+// taken in turns: taking pictures (only one tab can be photographed at a time) and accepting (while a job is being
+// accepted, no other site may bring its own tab to the front, because a hidden tab runs slowly).
+const siteRunning = new Set();
+const lastStart = {};
+let snapChain = Promise.resolve();
+let accepting = 0, acceptChain = Promise.resolve();
+
+async function runChecks(force) {
+  let cfg;
+  try { cfg = await (await fetch(SERVER + '/config')).json(); }
+  catch (e) { chrome.action.setBadgeText({ text: 'OFF' }); return; }  // agent not running
+  chrome.action.setBadgeText({ text: '' });
+  for (const site of cfg.sites) {
+    const every = (site.check_every_seconds || 60) * 1000;
+    if (siteRunning.has(site.id)) continue;                                   // still busy with the last check
+    if (!force && lastStart[site.id] && Date.now() - lastStart[site.id] < every - 5000) continue;   // not due yet
+    siteRunning.add(site.id);
+    lastStart[site.id] = Date.now();
+    runSite(site, cfg.skip_words || []).catch(() => {}).finally(() => siteRunning.delete(site.id));
+  }
+}
+
+async function runSite(site, skipWords) {
+  let err = null;
+  try { await checkSite(site, skipWords); }
+  catch (e) {
+    err = e;
+    if (/No tab with id/i.test(String(e))) {            // the tab was swapped or closed under us: look again, once
+      try { await checkSite(site, skipWords); err = null; } catch (e2) { err = e2; }
     }
-  } finally { running = false; }
+  }
+  if (err) await report(site, { url: '', text: '', html: '', error: String(err) });
+  if (site.proof) {                       // the owner asked for a reference picture now
+    try { const t = await findTab(site); if (t) await proofShots(t, site, 'on request'); } catch (e) { /* next check */ }
+  }
+}
+
+// Run fn while no other site is accepting, and block other sites' pictures until it is done.
+async function withAcceptLock(fn) {
+  const prev = acceptChain;
+  let release;
+  acceptChain = new Promise(r => { release = r; });
+  await prev;
+  accepting++;
+  try { return await fn(); } finally { accepting--; release(); }
+}
+async function whenNoAccept(maxMs) {
+  const t0 = Date.now();
+  while (accepting > 0 && Date.now() - t0 < (maxMs || 60000)) await sleep(200);
 }
 
 function hostOf(u) { try { return new URL(u).host; } catch { return ''; } }
@@ -197,7 +229,7 @@ async function checkSite(site, skipWords) {
       try { [res] = await read(); } catch (e) { /* keep what we had */ }
     }
   }
-  let accept = null, screenshotBefore = null;
+  let accept = null, screenshotBefore = null, screenshotAfter = null;
   const t = res.result.text || '';
   const hasJob = site.accept_kind === 'standardbank'
     ? NEW_JOBS_PAGE.test(t) && /Job\s*Id\s*-?\s*\d{6,}/i.test(t) && !/no new jobs found/i.test(t) && !/loading spinner/i.test(t)
@@ -205,15 +237,18 @@ async function checkSite(site, skipWords) {
       ? t.trim().length > 0 && !/no new jobs yet/i.test(t) && !isLoginUrl(site, res.result.url || '') && onNewJobsUrl(res)
       : false;
   if (ACCEPTORS[site.accept_kind] && site.auto_accept && hasJob) {
-    screenshotBefore = await snap(tab, true);                 // the job, before anything is clicked (restores a minimised window)
-    const tried = await getTried();
-    const [ar] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id }, func: ACCEPTORS[site.accept_kind], args: [Object.keys(tried), skipWords, !!site.recon] });
-    accept = ar.result;
-    for (const id of accept.attempted || []) tried[id] = Date.now();  // never click the same job twice
-    await setTried(tried);
+    await withAcceptLock(async () => {
+      screenshotBefore = await snap(tab, true);               // the job, before anything is clicked (restores a minimised window)
+      const tried = await getTried();
+      const [ar] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id }, func: ACCEPTORS[site.accept_kind], args: [Object.keys(tried), skipWords, !!site.recon] });
+      accept = ar.result;
+      for (const id of accept.attempted || []) tried[id] = Date.now();  // never click the same job twice
+      await setTried(tried);
+      screenshotAfter = await snap(tab, true);                // after a click, always get the picture
+    });
   }
-  const screenshot = await snap(tab, !!accept);              // after a click, always get the picture
+  const screenshot = accept ? screenshotAfter : await snap(tab, false);
   await report(site, { ...res.result, screenshot, screenshot_before: screenshotBefore, accept });
   // After an accepted Standard Bank job: photograph the dashboard and the "Jobs in progress" list, so the owner can
   // see where the job went (accepted jobs leave the New Jobs list).
@@ -267,7 +302,15 @@ async function setTried(tried) { await chrome.storage.local.set({ tried }); }
 // so bring this site's tab to the front of the agent's window first. Not possible while
 // the window is minimised.
 async function snap(tab, force) {
+  if (!force) await whenNoAccept();                    // routine pictures wait while a job is being accepted
+  const run = () => snapNow(tab, force);
+  const p = snapChain.then(run, run);                  // one picture at a time
+  snapChain = p.catch(() => {});
+  return p;
+}
+async function snapNow(tab, force) {
   try {
+    if (!force && accepting > 0) return null;          // an accept started meanwhile: do not steal the front tab
     const win = await chrome.windows.get(tab.windowId);
     if (win.state === 'minimized') {
       if (!force) return null;                          // routine checks never pop the window up
@@ -275,8 +318,9 @@ async function snap(tab, force) {
       await chrome.windows.update(tab.windowId, { state: 'normal', focused: false });
       await sleep(1200);
     }
-    await chrome.tabs.update(tab.id, { active: true });
-    await sleep(700);
+    const now = await chrome.tabs.get(tab.id);
+    if (now.active) { await sleep(120); }               // already showing: only let it paint
+    else { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
     return await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 60 });
   } catch (e) { return null; }
 }

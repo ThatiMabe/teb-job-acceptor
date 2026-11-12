@@ -74,7 +74,7 @@ async function acceptKandua(alreadyTried, skipWords, recon) {
   };
   const goBack = async () => {
     history.back();
-    for (let i = 0; i < 12; i++) { await wait(500); if (cards().length) return true; }
+    for (let i = 0; i < 40; i++) { await wait(150); if (cards().length) return true; }
     return false;
   };
 
@@ -94,13 +94,18 @@ async function acceptKandua(alreadyTried, skipWords, recon) {
     const startUrl = location.href;
     next.c.click();
     let opened = false;
-    for (let i = 0; i < 16 && !opened; i++) { await wait(500); opened = location.href !== startUrl || cards().length === 0; }
+    for (let i = 0; i < 55 && !opened; i++) { await wait(150); opened = location.href !== startUrl || cards().length === 0; }
     if (!opened) {
       out.needs_user = { job_id: next.key, fields: next, reason: 'Clicking the job card did not open the job.' };
       break;
     }
     let text = '', prev = '';
-    for (let i = 0; i < 10; i++) { await wait(700); text = norm(document.body.innerText); if (text && text === prev) break; prev = text; }
+    // the job text must be settled before the "microwave" check reads it, and the Accept button must be there
+    for (let i = 0; i < 18; i++) {
+      await wait(450); text = norm(document.body.innerText);
+      if (text && text === prev && clickables(document).some(b => ACCEPT.includes(label(b)))) break;
+      prev = text;
+    }
     const detailUrl = location.href;
     const fields = { title: next.title, date_time: next.date_time, location: next.location, loss: '', emergency: '',
                      description: text.slice(0, 1500) };
@@ -148,8 +153,8 @@ async function acceptKandua(alreadyTried, skipWords, recon) {
     const labelsBefore = new Set(clickables(document).map(label));
     btn.click();
     let popup = null, fresh = [];
-    for (let i = 0; i < 16 && !popup; i++) {
-      await wait(500);
+    for (let i = 0; i < 55 && !popup; i++) {
+      await wait(150);
       const std = [...document.querySelectorAll(DIALOG)].find(d => vis(d) && label(d).length > 0) || null;
       fresh = clickables(document).filter(b => !labelsBefore.has(label(b)));
       if (std || fresh.length) {
@@ -161,6 +166,8 @@ async function acceptKandua(alreadyTried, skipWords, recon) {
     }
     let dialogText = null;
     if (popup) {
+      await wait(250);                                   // let all of the pop-up's buttons appear before reading them
+      fresh = clickables(document).filter(b => !labelsBefore.has(label(b)));
       await snapAll('Pop-up after pressing Accept', false);
       dialogText = norm(popup.innerText).slice(0, 600);
       const inputs = [...popup.querySelectorAll('input:not([type="hidden"]):not([type="button"]):not([type="submit"]), select, textarea')].filter(vis);
@@ -176,7 +183,7 @@ async function acceptKandua(alreadyTried, skipWords, recon) {
                            reason: 'A pop-up after ACCEPT mentions money, so it was NOT confirmed.' };
         break;
       }
-      if (inputs.length === 0 && yes.length === 1) { yes[0].click(); await wait(1500); }
+      if (inputs.length === 0 && yes.length === 1) { yes[0].click(); await wait(100); }
       else {
         out.needs_user = { job_id: next.key, fields, url: detailUrl, dialog_text: dialogText, buttons: btns.map(label),
                            reason: inputs.length ? 'A pop-up after ACCEPT asks for input (tick box, date or text).'
@@ -189,8 +196,8 @@ async function acceptKandua(alreadyTried, skipWords, recon) {
     await snapAll('Screen after pressing Accept', false);
     const HINT = /(job|request)\s+(has been\s+|was\s+)?accepted|you(\s+have|'ve)\s+accepted|accepted\s+successfully|successfully\s+accepted/i;
     let done = false;
-    for (let i = 0; i < 16 && !done; i++) {
-      await wait(500);
+    for (let i = 0; i < 40 && !done; i++) {
+      await wait(200);
       done = !clickables(document).some(b => ACCEPT.includes(label(b))) || location.href !== detailUrl
              || HINT.test(norm(document.body.innerText));
     }
