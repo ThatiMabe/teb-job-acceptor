@@ -6,6 +6,8 @@ This repository is a living case study: the code, the decisions behind it, and a
 
 > Status: running on the owner's PC. Automatic accepting has been **proven on a live job on one platform** (2 accepted, confirmed by the platform's own message). On the second platform the first live attempt stopped safely on a pop-up the agent had never seen; that was fixed from the owner's screenshots and is **awaiting its next live job**. See [Results](#results-so-far).
 
+> **Consulting view:** a 15-slide case study of the context, method and problems solved. [Read it as a slideshow](https://thatimabe.github.io/teb-job-acceptor/) or [download the PDF](docs/TEB-Job-Acceptor-Consulting-Case-Study.pdf).
+
 ---
 
 ## The problem
@@ -19,7 +21,7 @@ Job offers arrive at any hour and are usually given to whoever accepts first. Th
 
 ## What it does
 
-- Reloads each platform's "new jobs" page every 60 seconds, exactly as a person would press refresh.
+- Reloads each platform's "new jobs" page (every 30 seconds on one platform, 60 on the other), exactly as a person would press refresh.
 - Recognises the real "new jobs" page (and ignores every other page, such as "unassigned" or "my jobs").
 - Opens a new job, applies the owner's rule (skip any job mentioning a banned word), clicks **Accept**, and confirms the platform's pop-up.
 - Sends Telegram messages: new job, accepted (with before/after screenshots), skipped by rule, needs-the-owner, signed out, checks stopped.
